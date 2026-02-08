@@ -3,43 +3,42 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>wow</title>
+<title>Tiny Terraria-like 2D Sandbox (HTML) - Improved</title>
 <style>
-  html,body{height:100%;margin:0;background:#6ec6ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial}
-  #game{display:block;margin:0 auto;background:linear-gradient(#87CEEB,#7ec0ff);box-shadow:0 6px 24px rgba(0,0,0,0.25);}
-  #ui{position:fixed;left:12px;bottom:12px;display:flex;gap:6px}
+  html,body{height:100%;margin:0;background:#3b82f6;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial}
+  #game{display:block;background:linear-gradient(#7ec0ff,#8fd7ff);}
+  #ui{position:fixed;left:12px;bottom:12px;display:flex;gap:6px;z-index:50}
   .slot{width:48px;height:48px;border-radius:8px;background:rgba(255,255,255,0.12);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;border:2px solid rgba(0,0,0,0.15)}
   .slot.selected{outline:3px solid gold}
-  #help{position:fixed;right:12px;bottom:12px;padding:8px 10px;background:rgba(0,0,0,0.35);color:#fff;border-radius:8px;font-size:13px}
-  #title{position:fixed;left:12px;top:12px;color:#063; font-weight:700; text-shadow:0 1px 0 #fff7}
+  #help{position:fixed;right:12px;bottom:12px;padding:8px 10px;background:rgba(0,0,0,0.35);color:#fff;border-radius:8px;font-size:13px;z-index:50}
+  #title{position:fixed;left:12px;top:12px;color:#063; font-weight:700; text-shadow:0 1px 0 #fff7;z-index:50}
+  canvas{display:block}
 </style>
 </head>
 <body>
-<canvas id="game" width="1280" height="720"></canvas>
+<canvas id="game"></canvas>
 <div id="title">Tiny Sandbox — sprites from <code>sprites/</code></div>
 <div id="ui"></div>
-<div id="help">Controls: A/D ←/→ move, Space jump, Mouse left-dig, right-place, 1-7 select block</div>
+<div id="help">Controls: A/D ←/→ move, Space jump, Mouse left-dig, right-place, 1-7 select block — Reach: 6 tiles</div>
 <script>
-/*
-  Tiny Terraria-like 2D sandbox (single-file)
-  - Infinite horizontal terrain (procedural, deterministic)
-  - Blocks: dirt, grass, stone, granite, diorite, copper_ore, tin_ore
-  - Character sprite: sprites/character.png
-  - Sprites folder: sprites/<name>.png (spaces replaced by _)
-  - Host on GitHub Pages: include the "sprites" directory next to this HTML file.
+/* Improved single-file sandbox
+   - fullscreen canvas
+   - fixed physics timing (no ultra-fast play)
+   - character is a cube (drawn procedurally)
+   - reach for mining/placing enforced
+   - improved terrain with caves
+   - simple lighting: sky light + propagation into caves
+   - sprites still loaded from sprites/ but character cube used instead of sprite
 */
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-let W = canvas.width, H = canvas.height;
-const tileSize = 32; // pixels
-const viewTilesX = Math.ceil(W / tileSize);
-const viewTilesY = Math.ceil(H / tileSize) + 2;
+let W = 800, H = 600;
+const tileSize = 32;
+let dpr = window.devicePixelRatio || 1;
 
-const blockNames = [
-  'dirt','grass','stone','granite','diorite','copper_ore','tin_ore'
-];
-
+// world
+const blockNames = ['dirt','grass','stone','granite','diorite','copper_ore','tin_ore'];
 const spriteCache = {};
 function loadSprite(name){
   return new Promise(resolve => {
@@ -50,330 +49,225 @@ function loadSprite(name){
     img.onerror = ()=>{ spriteCache[name]=null; resolve(null); };
   });
 }
+Promise.all(['character',...blockNames.map(n=>n.replace(/ /g,'_'))].map(loadSprite)).then(()=>{ init(); });
 
-// preload sprites (best-effort)
-const toLoad = ['character',...blockNames.map(n=>n.replace(/ /g,'_'))];
-Promise.all(toLoad.map(loadSprite)).then(()=>{
-  // start after attempting to load
-  init();
-});
-
-// --- Procedural world generation (1D value noise for height)
-function hash32(n){
-  n = Math.imul(n, 0x27d4eb2d);
-  return (n ^ (n >>> 15)) >>> 0;
-}
-function randFrom(n){
-  // returns 0..1
-  return (hash32(n) % 1000000) / 1000000;
-}
+// hashing-based noises
+function hash32(n){ n = Math.imul(n, 0x27d4eb2d); return (n ^ (n >>> 15)) >>> 0; }
+function randFrom(n){ return (hash32(n) % 1000000) / 1000000; }
 function smoothstep(t){ return t*t*(3-2*t); }
-function valueNoise1D(x, seed=0){
-  const xi = Math.floor(x);
-  const xf = x - xi;
-  const v1 = randFrom(xi+seed);
-  const v2 = randFrom(xi+1+seed);
-  const t = smoothstep(xf);
-  return v1*(1-t) + v2*t;
+function valueNoise1D(x, seed=0){ const xi=Math.floor(x), xf=x-xi; const v1=randFrom(xi+seed), v2=randFrom(xi+1+seed); const t=smoothstep(xf); return v1*(1-t)+v2*t; }
+function fractalNoise1D(x, oct=5){ let total=0, amp=1, freq=1, maxA=0; for(let o=0;o<oct;o++){ total+=valueNoise1D(x*freq,1000*o)*amp; maxA+=amp; amp*=0.5; freq*=2; } return total/maxA; }
+function valueNoise2D(x,y,seed=0){ // separable approach
+  const xi=Math.floor(x), yi=Math.floor(y); const xf=x-xi, yf=y-yi;
+  const n00 = randFrom(xi*73856093 ^ yi*19349663 ^ seed);
+  const n10 = randFrom((xi+1)*73856093 ^ yi*19349663 ^ seed);
+  const n01 = randFrom(xi*73856093 ^ (yi+1)*19349663 ^ seed);
+  const n11 = randFrom((xi+1)*73856093 ^ (yi+1)*19349663 ^ seed);
+  const u = smoothstep(xf), v = smoothstep(yf);
+  const nx0 = n00*(1-u) + n10*u;
+  const nx1 = n01*(1-u) + n11*u;
+  return nx0*(1-v) + nx1*v;
 }
-function fractalNoise1D(x){
-  // multiple octaves
-  let total = 0; let amp = 1; let freq = 1; let maxA = 0;
-  for(let o=0;o<5;o++){
-    total += valueNoise1D(x*freq, 1000*o) * amp;
-    maxA += amp; amp *= 0.5; freq *= 2;
-  }
-  return total / maxA;
-}
+function fractalNoise2D(x,y,oct=4){ let total=0, amp=1, freq=1, maxA=0; for(let o=0;o<oct;o++){ total+=valueNoise2D(x*freq,y*freq, 10000*o) * amp; maxA+=amp; amp*=0.5; freq*=2; } return total/maxA; }
 
-// world parameters
-const seaLevel = 80; // tile y coordinate for reference
-const world = new Map(); // key: x (int) -> column array of tile names or null
+const world = new Map(); // x -> column array
+const COL_HEIGHT = 256;
+const seaLevel = 90;
 
 function generateColumn(x){
   if(world.has(x)) return world.get(x);
-  // generate height
-  const n = fractalNoise1D(x/40);
-  const n2 = fractalNoise1D(x/80);
-  const height = Math.floor(seaLevel + n*18 + n2*36);
-  const colHeight = 160; // maximum considered
-  const col = new Array(colHeight).fill(null);
-  for(let y=0;y<colHeight;y++){
-    if(y > height){
-      // air
-      col[y]=null;
-    } else if(y === height){
-      col[y] = 'grass';
-    } else if(y > height-5){
-      col[y] = 'dirt';
-    } else {
-      // mostly stone with occasional granite/diorite
-      let rock = 'stone';
-      const r = randFrom(x*73856093 + y*19349663);
-      if(r < 0.03) rock = 'granite';
-      else if(r < 0.06) rock = 'diorite';
-      // ores: copper and tin in veins, more common deeper
-      const depth = height - y; // how deep below surface
-      const oreRand = randFrom(x*1299827 + y*57885161);
-      if(rock === 'stone'){
-        if(depth > 8 && depth < 80 && oreRand < 0.015) rock = 'copper_ore';
-        if(depth > 24 && depth < 120 && oreRand > 0.98) rock = 'tin_ore';
-      }
-      col[y] = rock;
+  // height via 1D fractal + low freq trend
+  const hBase = Math.floor(seaLevel + fractalNoise1D(x/48,5)*26 + fractalNoise1D(x/160,4)*40);
+  const col = new Array(COL_HEIGHT).fill(null);
+  for(let y=0;y<COL_HEIGHT;y++){
+    // cave carving using 2D noise: carve when noise > threshold depending on depth
+    const caveNoise = fractalNoise2D(x/16, y/16,4);
+    const caveThreshold = 0.6 + (y/ COL_HEIGHT) * 0.15; // fewer caves very deep
+    let isAirDueToCave = caveNoise > caveThreshold;
+    if(y > hBase){ col[y] = null; continue; }
+    if(y === hBase){ col[y] = 'grass'; continue; }
+    if(y > hBase - 4){ col[y] = 'dirt'; continue; }
+    // rock
+    let rock = 'stone';
+    const r = randFrom(x*73856093 + y*19349663);
+    if(r < 0.03) rock = 'granite'; else if(r < 0.06) rock = 'diorite';
+    // ores
+    const depth = hBase - y;
+    const oreRand = randFrom(x*1299827 + y*57885161);
+    if(rock === 'stone'){
+      if(depth > 8 && depth < 80 && oreRand < 0.016) rock = 'copper_ore';
+      if(depth > 24 && depth < 140 && oreRand > 0.985) rock = 'tin_ore';
     }
+    col[y] = isAirDueToCave ? null : rock;
   }
-  world.set(x, col);
+  world.set(x,col);
   return col;
 }
 
+function worldGet(x,y){ const col = generateColumn(x); if(y<0||y>=col.length) return null; return col[y]; }
+function worldSet(x,y,name){ const col=generateColumn(x); if(y<0||y>=col.length) return false; col[y]=name; return true; }
+
 // player
-const player = {
-  x: 0.5, y: 100, vx:0, vy:0, width:0.8, height:1.6, onGround:false
-};
+const player = { x:0.5, y:100, vx:0, vy:0, width:0.9, height:1.6, onGround:false };
+// reach (tiles)
+const REACH = 6;
 
 // camera
-const cam = {x: 0, y: 0};
+const cam = { x:0, y:0 };
 
 // input
 const keys = {};
 window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; });
 window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
 
-// mouse
-let mouse = {x:0,y:0,down:false,right:false};
-canvas.addEventListener('mousemove', e=>{
-  const r = canvas.getBoundingClientRect();
-  mouse.x = (e.clientX - r.left);
-  mouse.y = (e.clientY - r.top);
-});
-canvas.addEventListener('mousedown', e=>{
-  if(e.button===0) mouse.down=true; if(e.button===2) mouse.right=true;
-});
+let mouse = { x:0, y:0, down:false, right:false };
+canvas.addEventListener('mousemove', e=>{ const r=canvas.getBoundingClientRect(); mouse.x = (e.clientX - r.left) * (canvas.width / r.width); mouse.y = (e.clientY - r.top) * (canvas.height / r.height); });
+canvas.addEventListener('mousedown', e=>{ if(e.button===0) mouse.down=true; if(e.button===2) mouse.right=true; });
 canvas.addEventListener('mouseup', e=>{ if(e.button===0) mouse.down=false; if(e.button===2) mouse.right=false; });
 canvas.addEventListener('contextmenu', e=>e.preventDefault());
 
-// world interactions: dig/place
-function worldGet(x,y){
-  const col = generateColumn(x);
-  if(y<0 || y>=col.length) return null;
-  return col[y];
-}
-function worldSet(x,y,name){
-  const col = generateColumn(x);
-  if(y<0 || y>=col.length) return false;
-  col[y] = name;
-  return true;
-}
-
-// mining: left click -> destroys block at mouse tile by setting to null
-// placing: right click -> sets selected block
+// hotbar
 let selectedIndex = 0;
-const hotbar = blockNames; // same order
-
-// UI hotbar
+const hotbar = blockNames;
 const ui = document.getElementById('ui');
-function rebuildHotbar(){
-  ui.innerHTML='';
-  for(let i=0;i<hotbar.length;i++){
-    const s = document.createElement('div');
-    s.className='slot'+(i===selectedIndex? ' selected':'');
-    s.title = (i+1) + ' — ' + hotbar[i];
-    const img = document.createElement('img');
-    img.style.width='28px'; img.style.height='28px';
-    const name = hotbar[i].replace(/ /g,'_');
-    img.src = 'sprites/'+name+'.png';
-    img.onerror = ()=>{ img.style.display='none'; s.textContent = (i+1); };
-    s.appendChild(img);
-    ui.appendChild(s);
-  }
-}
+function rebuildHotbar(){ ui.innerHTML=''; for(let i=0;i<hotbar.length;i++){ const s=document.createElement('div'); s.className='slot'+(i===selectedIndex?' selected':''); s.title=(i+1)+' — '+hotbar[i]; const img=document.createElement('img'); img.style.width='28px'; img.style.height='28px'; const name=hotbar[i].replace(/ /g,'_'); img.src='sprites/'+name+'.png'; img.onerror=()=>{ img.style.display='none'; s.textContent=(i+1); }; s.appendChild(img); ui.appendChild(s); } }
 rebuildHotbar();
-window.addEventListener('keydown', e=>{
-  if(e.key>='1' && e.key<='9'){
-    const idx = parseInt(e.key)-1;
-    if(idx < hotbar.length){ selectedIndex = idx; rebuildHotbar(); }
-  }
-});
+window.addEventListener('keydown', e=>{ if(e.key>='1'&&e.key<='9'){ const idx=parseInt(e.key)-1; if(idx<hotbar.length){ selectedIndex=idx; rebuildHotbar(); } } });
 
-// gameplay constants
-const GRAV = 0.45; const FRICTION = 0.85; const MAX_FALL = 12;
+// physics constants (per second)
+const GRAV = 28; const MAX_FALL = 60; const HACC = 40; const HMAX = 8; const JUMP_V = 12;
 
-function update(dt){
-  // horizontal movement
-  const speed = 6;
-  let move = 0;
-  if(keys['a'] || keys['arrowleft']) move -= 1;
-  if(keys['d'] || keys['arrowright']) move += 1;
-  player.vx += move * 0.5;
-  player.vx *= 0.9;
-  if(Math.abs(player.vx) > speed) player.vx = Math.sign(player.vx)*speed;
+function collides(px, py){ const left = px - player.width/2; const right = px + player.width/2; const top = py - player.height; const bottom = py; for(let tx=Math.floor(left); tx<=Math.floor(right-1e-9); tx++){ for(let ty=Math.floor(top); ty<=Math.floor(bottom-1e-9); ty++){ const t = worldGet(tx,ty); if(t !== null) return true; } } return false; }
 
-  // jump
-  if((keys[' '] || keys['w'] || keys['arrowup']) && player.onGround){ player.vy = -10; player.onGround=false; }
-
-  // gravity
-  player.vy += GRAV; if(player.vy > MAX_FALL) player.vy = MAX_FALL;
-
-  // apply movement with simple tile collision
-  // predict horizontal
-  let nx = player.x + player.vx * dt;
-  if(!collides(nx, player.y)) player.x = nx; else player.vx = 0;
-  // predict vertical
-  let ny = player.y + player.vy * dt;
-  if(!collides(player.x, ny)){
-    player.y = ny; player.onGround=false;
-  } else {
-    // collided vertically
-    if(player.vy > 0){ // landing
-      player.onGround = true;
-    }
-    player.vy = 0;
-  }
-
-  // camera follow
-  cam.x = player.x * tileSize - W/2 + (player.width*tileSize)/2;
-  cam.y = player.y * tileSize - H/2 + (player.height*tileSize)/2;
-
-  // mouse interactions
-  handleMouseActions();
+let lastAction = 0;
+function handleMouseActions(now){ const mx = Math.floor((mouse.x + cam.x)/tileSize); const my = Math.floor((mouse.y + cam.y)/tileSize); const px = Math.floor(player.x); const py = Math.floor(player.y);
+  const dx = (mx+0.5) - player.x; const dy = (my+0.5) - (player.y - player.height/2); const distTiles = Math.sqrt(dx*dx + dy*dy);
+  if(mouse.down && now - lastAction > 120){ if(distTiles <= REACH){ const block = worldGet(mx,my); if(block !== null){ worldSet(mx,my,null); } } lastAction = now; }
+  if(mouse.right && now - lastAction > 120){ if(distTiles <= REACH){ const block = worldGet(mx,my); if(block === null){ const name = hotbar[selectedIndex]; // don't place inside player
+        if(!(mx>=px-1 && mx<=px+1 && my>=py-2 && my<=py)) worldSet(mx,my,name); } } lastAction = now; }
 }
 
-function collides(px, py){
-  // check 4 corners of player's bbox against solid tiles
-  const left = px - player.width/2; const right = px + player.width/2;
-  const top = py - player.height; const bottom = py;
-  for(let tx=Math.floor(left); tx<=Math.floor(right-1e-9); tx++){
-    for(let ty=Math.floor(top); ty<=Math.floor(bottom-1e-9); ty++){
-      const t = worldGet(tx, ty);
-      if(t !== null){
-        return true;
+// lighting: compute light map for visible region
+function computeLight(startX,endX,startY,endY){
+  // We compute light only for air tiles and also for solid tile shading
+  const light = new Map(); // key `${x},${y}` -> light 0..1
+  const q = [];
+  // initialize: any air tile that has clear path to sky (no solid above) => light 1
+  for(let x=startX-2;x<=endX+2;x++){
+    // find topmost solid in column within [startY-20, endY+20] region; but simpler: for y from startY-2 down to 0
+    for(let y=startY-2;y<=endY+2;y++){
+      const tile = worldGet(x,y);
+      if(tile === null){
+        // check if there's any solid above this tile
+        let blocked=false; for(let yy=y-1; yy>=0; yy--){ if(worldGet(x,yy)!==null){ blocked=true; break; } }
+        if(!blocked){ const k = x+','+y; light.set(k,1); q.push({x,y,l:1}); }
       }
     }
   }
-  return false;
+  // BFS propagate through air (and give some light to solids on edges)
+  const adj = [[1,0],[-1,0],[0,1],[0,-1]];
+  while(q.length){ const cur=q.shift(); for(const a of adj){ const nx=cur.x+a[0], ny=cur.y+a[1]; const k=nx+','+ny; const prev = light.get(k) || 0; const nl = cur.l - 0.14; if(nl <= 0) continue; const tile = worldGet(nx,ny); if(tile === null){ if(nl > prev){ light.set(k,nl); q.push({x:nx,y:ny,l:nl}); } } else {
+      // solid: allow some light to reach its face but it doesn't propagate further through it
+      const solidLight = nl * 0.6; if(solidLight > prev){ light.set(k, solidLight); }
+    } }
+  }
+  return light;
 }
 
-let lastMouseAction = 0;
-function handleMouseActions(){
-  const mx = Math.floor((mouse.x + cam.x)/tileSize);
-  const my = Math.floor((mouse.y + cam.y)/tileSize);
-  const now = performance.now();
-  if(mouse.down && now - lastMouseAction > 120){
-    // dig
-    const block = worldGet(mx,my);
-    if(block !== null){ worldSet(mx,my,null); }
-    lastMouseAction = now;
-  }
-  if(mouse.right && now - lastMouseAction > 120){
-    // place selected block if empty and not inside player
-    const block = worldGet(mx,my);
-    if(block === null){
-      const name = hotbar[selectedIndex];
-      // prevent placing where player stands; simple check
-      const px = Math.floor(player.x); const py = Math.floor(player.y);
-      if(!(mx>=px-1 && mx<=px+1 && my>=py-2 && my<=py)){
-        worldSet(mx,my,name);
-      }
-    }
-    lastMouseAction = now;
-  }
-}
+// drawing tile with light factor
+function drawTile(name, sx, sy, lightVal){ const img = spriteCache[name]; const brightness = Math.max(0.2, Math.min(1, lightVal || 0.2)); ctx.save(); ctx.globalAlpha = brightness; if(img){ ctx.drawImage(img, sx, sy, tileSize, tileSize); } else { const colorMap = {'dirt':'#7b4f2a','grass':'#4caf50','stone':'#8b8b8b','granite':'#9e7f7f','diorite':'#cfcfcf','copper_ore':'#b87333','tin_ore':'#c0c0ff'}; ctx.fillStyle = colorMap[name]||'#f0f'; ctx.fillRect(sx, sy, tileSize, tileSize); ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.strokeRect(sx+0.5, sy+0.5, tileSize-1, tileSize-1); } ctx.restore(); }
 
-// rendering
-function draw(){
-  // clear
-  ctx.clearRect(0,0,W,H);
-
-  // sky gradient
-  const g = ctx.createLinearGradient(0,0,0,H);
-  g.addColorStop(0,'#7ec0ff'); g.addColorStop(1,'#8fd7ff');
-  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
-
-  // compute visible tile range
-  const startX = Math.floor(cam.x / tileSize) - 2;
-  const endX = Math.ceil((cam.x + W) / tileSize) + 2;
-  const startY = Math.floor(cam.y / tileSize) - 2;
-  const endY = Math.ceil((cam.y + H) / tileSize) + 2;
-
-  // draw tiles
-  for(let tx = startX; tx <= endX; tx++){
-    const col = generateColumn(tx);
-    for(let ty = startY; ty <= endY; ty++){
-      const tile = (ty>=0 && ty<col.length) ? col[ty] : null;
-      if(tile === null) continue;
-      const sx = tx*tileSize - cam.x;
-      const sy = ty*tileSize - cam.y;
-      drawTile(tile, sx, sy);
-    }
-  }
-
-  // draw grid lightly (optional)
-  // player
-  const charImg = spriteCache['character'];
-  const px = player.x*tileSize - cam.x - (player.width*tileSize)/2;
-  const py = player.y*tileSize - cam.y - player.height*tileSize;
-  if(charImg){
-    ctx.drawImage(charImg, px, py, player.width*tileSize, player.height*tileSize);
-  } else {
-    // fallback
-    ctx.fillStyle = '#ff7f50'; ctx.fillRect(px, py, player.width*tileSize, player.height*tileSize);
-  }
-
-  // mouse highlight
-  const mtx = Math.floor((mouse.x + cam.x)/tileSize);
-  const mty = Math.floor((mouse.y + cam.y)/tileSize);
-  const hx = mtx*tileSize - cam.x;
-  const hy = mty*tileSize - cam.y;
-  ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth=2;
-  ctx.strokeRect(hx+1, hy+1, tileSize-2, tileSize-2);
-}
-
-function drawTile(name, sx, sy){
-  const img = spriteCache[name];
-  if(img){ ctx.drawImage(img, sx, sy, tileSize, tileSize); }
-  else {
-    // fallback color for each type
-    const colorMap = {
-      'dirt':'#7b4f2a','grass':'#4caf50','stone':'#8b8b8b','granite':'#9e7f7f','diorite':'#cfcfcf','copper_ore':'#b87333','tin_ore':'#c0c0ff'
-    };
-    ctx.fillStyle = colorMap[name]||'#f0f'; ctx.fillRect(sx, sy, tileSize, tileSize);
-    ctx.strokeStyle = 'rgba(0,0,0,0.08)'; ctx.strokeRect(sx+0.5, sy+0.5, tileSize-1, tileSize-1);
-  }
-}
+// draw player as a cube
+function drawPlayer(px,py){ const sx = px*tileSize - cam.x - (player.width*tileSize)/2; const sy = py*tileSize - cam.y - player.height*tileSize;
+  // cube face: top, left, front shading
+  ctx.save(); ctx.translate(sx, sy);
+  // body
+  ctx.fillStyle = '#ffcc66'; ctx.fillRect(0,0,player.width*tileSize, player.height*tileSize);
+  // simple shadow
+  ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.fillRect(0, player.height*tileSize*0.7, player.width*tileSize, player.height*tileSize*0.3);
+  ctx.restore(); }
 
 // main loop
 let last = performance.now();
-function loop(now){
-  const dt = Math.min(60,(now-last))/16; last = now;
-  update(dt);
-  draw();
-  requestAnimationFrame(loop);
+function updateAndRender(now){
+  const dt = Math.min(0.05, (now-last)/1000); last = now; // clamp dt to avoid huge jumps
+
+  // input
+  let move = 0; if(keys['a']||keys['arrowleft']) move -= 1; if(keys['d']||keys['arrowright']) move += 1;
+  player.vx += move * HACC * dt; player.vx *= 1 - Math.min(0.9, 10*dt); if(Math.abs(player.vx) > HMAX) player.vx = Math.sign(player.vx)*HMAX;
+  if((keys[' ']||keys['w']||keys['arrowup']) && player.onGround){ player.vy = -JUMP_V; player.onGround = false; }
+  player.vy += GRAV * dt; if(player.vy > MAX_FALL) player.vy = MAX_FALL;
+
+  // movement & collisions (continuous)
+  let nx = player.x + player.vx * dt;
+  if(!collides(nx, player.y)) player.x = nx; else player.vx = 0;
+  let ny = player.y + player.vy * dt;
+  if(!collides(player.x, ny)){ player.y = ny; player.onGround = false; } else { if(player.vy > 0) player.onGround = true; player.vy = 0; }
+
+  // camera
+  cam.x = player.x * tileSize - W/2 + (player.width*tileSize)/2;
+  cam.y = player.y * tileSize - H/2 + (player.height*tileSize)/2;
+
+  handleMouseActions(now);
+
+  // render
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // sky
+  const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#7ec0ff'); g.addColorStop(1,'#8fd7ff'); ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  const startX = Math.floor(cam.x / tileSize) - 4;
+  const endX = Math.ceil((cam.x + W) / tileSize) + 4;
+  const startY = Math.floor(cam.y / tileSize) - 4;
+  const endY = Math.ceil((cam.y + H) / tileSize) + 4;
+
+  const lightMap = computeLight(startX,endX,startY,endY);
+
+  for(let tx = startX; tx<=endX; tx++){
+    const col = generateColumn(tx);
+    for(let ty = startY; ty<=endY; ty++){
+      const tile = (ty>=0 && ty<col.length) ? col[ty] : null;
+      if(tile === null) continue;
+      const sx = Math.round(tx*tileSize - cam.x);
+      const sy = Math.round(ty*tileSize - cam.y);
+      const key = tx+','+ty; const lightVal = lightMap.get(key) || 0.2;
+      drawTile(tile, sx, sy, lightVal);
+    }
+  }
+
+  // draw player cube
+  drawPlayer(player.x, player.y);
+
+  // highlight reach area
+  const mtx = Math.floor((mouse.x + cam.x)/tileSize);
+  const mty = Math.floor((mouse.y + cam.y)/tileSize);
+  const hx = mtx*tileSize - cam.x; const hy = mty*tileSize - cam.y;
+  const dx = (mtx+0.5) - player.x; const dy = (mty+0.5) - (player.y - player.height/2);
+  const distTiles = Math.sqrt(dx*dx + dy*dy);
+  ctx.strokeStyle = distTiles <= REACH ? 'rgba(255,255,255,0.9)' : 'rgba(255,80,80,0.85)'; ctx.lineWidth=2; ctx.strokeRect(Math.round(hx)+1, Math.round(hy)+1, tileSize-2, tileSize-2);
+
+  requestAnimationFrame(updateAndRender);
 }
 
 function init(){
-  // ensure some columns around 0
-  for(let x=-200;x<=200;x++) generateColumn(x);
-  // place player on surface at x=0
-  const col0 = generateColumn(0);
-  let spawnY = 0; for(let y=0;y<col0.length;y++) if(col0[y] !== null){ spawnY = y-0.01; break; }
+  resizeCanvas();
+  // pre-generate some columns
+  for(let x=-400;x<=400;x++) generateColumn(x);
+  // spawn on surface x=0
+  const col0 = generateColumn(0); let spawnY = 0; for(let y=0;y<col0.length;y++){ if(col0[y] !== null){ spawnY = y-0.01; break; } }
   player.x = 0.5; player.y = spawnY;
-
-  last = performance.now();
-  requestAnimationFrame(loop);
+  last = performance.now(); requestAnimationFrame(updateAndRender);
 }
 
-// handle resizing
-window.addEventListener('resize', ()=>{
-  const ratio = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  // keep fixed size but scale for crispness
-});
+function resizeCanvas(){
+  dpr = Math.max(1, window.devicePixelRatio || 1);
+  W = Math.max(320, window.innerWidth); H = Math.max(240, window.innerHeight);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  canvas.width = Math.floor(W * dpr); canvas.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', ()=>{ resizeCanvas(); });
 
-// nice small helpers: move camera when window clicked? none.
-
-// instructions to user in console
-console.log('Tiny sandbox loaded. Place this HTML and a sprites folder (sprites/<name>.png) on your GitHub Pages site.');
-console.log('Block sprite names expected:', toLoad.join(', '));
+console.log('Improved sandbox loaded. Put sprites in sprites/ if you want custom tile art. Character drawn as a cube.');
 </script>
 </body>
 </html>
